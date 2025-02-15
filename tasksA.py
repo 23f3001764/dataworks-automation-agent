@@ -8,6 +8,10 @@ import os
 import requests
 from dotenv import load_dotenv
 import math
+import base64
+import numpy as np
+
+import math
 
 def cosine_similarity(vec1, vec2):
     """Calculate cosine similarity between two vectors."""
@@ -17,6 +21,7 @@ def cosine_similarity(vec1, vec2):
     if magnitude1 == 0 or magnitude2 == 0:
         return 0  # Avoid division by zero
     return dot_product / (magnitude1 * magnitude2)
+
 
 load_dotenv()
 
@@ -126,82 +131,72 @@ def A7(filename='/data/email.txt', output_file='/data/email-sender.txt'):
     with open(output_file, 'w') as file:
         file.write(sender_email)
 
-import base64
 def png_to_base64(image_path):
     with open(image_path, "rb") as image_file:
-        base64_string = base64.b64encode(image_file.read()).decode('utf-8')
-    return base64_string
+        return base64.b64encode(image_file.read()).decode('utf-8')
 
 def A8(filename='/data/credit-card.txt', image_path='/data/credit-card.png'):
     """
     Extract a credit card number from an image using an LLM and save it to a text file.
     """
-    def png_to_base64(image_path):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
-    
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
     body = {
         "model": "gpt-4-vision-preview",
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "text",
-                        "text": "Extract the full credit card number from this image. The number will have 16 to 19 digits, possibly separated by spaces. Return only the digits without any spaces or other characters."
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{png_to_base64(image_path)}"
-                        }
-                    }
+                    {"type": "text", "text": "Extract the full credit card number from this image."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_to_base64(image_path)}"}}
                 ]
             }
         ],
-        "max_tokens": 300
+        "max_tokens": 100
     }
-    
+
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.getenv('AIPROXY_TOKEN')}"
+        "Authorization": f"Bearer {AIPROXY_TOKEN}"
     }
-    
+
     response = requests.post(
         "http://aiproxy.sanand.workers.dev/openai/v1/chat/completions",
         headers=headers,
         json=body
     )
-    
+
     if response.status_code != 200:
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"API request failed: {response.text}"
-        )
-    
+        raise HTTPException(status_code=response.status_code, detail=f"API request failed: {response.text}")
+
+    # Extract response content
     result = response.json()
-    card_number = result['choices'][0]['message']['content'].strip().replace(" ", "")
-    
-    if not card_number.isdigit() or len(card_number) < 16 or len(card_number) > 19:
+    card_number = result.get('choices', [{}])[0].get('message', {}).get('content', "").strip()
+
+    # Validate card number
+    if not card_number.isdigit() or not (16 <= len(card_number) <= 19):
         raise ValueError(f"Invalid card number extracted: {card_number}")
-    
+
+    # Write to file
     with open(filename, 'w') as file:
         file.write(card_number)
-    
+
     print(f"Card number extracted and saved to {filename}: {card_number}")
 
 def get_embedding(text):
     """
-    Get the embedding for a given text using the AIProxy service.
+    Get the embedding for a given text using AIProxy.
     """
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.getenv('AIPROXY_TOKEN')}"
+        "Authorization": f"Bearer {AIPROXY_TOKEN}"
     }
     data = {
         "model": "text-embedding-3-small",
         "input": [text]
     }
+
     try:
         response = requests.post(
             "https://aiproxy.sanand.workers.dev/openai/v1/embeddings",
@@ -209,51 +204,55 @@ def get_embedding(text):
             json=data
         )
         response.raise_for_status()
-        return response.json().get("data", [{}])[0].get("embedding", [])
+        return response.json()["data"][0]["embedding"]
     except requests.exceptions.RequestException as e:
-        print(f"Failed to get embedding: {e}")
-        raise
+        raise RuntimeError(f"Failed to get embedding: {e}")
 
 def A9(filename='/data/comments.txt', output_filename='/data/comments-similar.txt'):
     """
     Find the most similar pair of comments using embeddings and save them to a file.
     """
-    from sklearn.metrics.pairwise import cosine_similarity
-    
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"File not found: {filename}")
+
+    # Read comments
     with open(filename, 'r') as f:
-        comments = [line.strip() for line in f.readlines()]
-    
+        comments = [line.strip() for line in f.readlines() if line.strip()]
+
+    if len(comments) < 2:
+        raise ValueError("Not enough comments to compare.")
+
+    # Compute embeddings
     embeddings = []
     for comment in comments:
         try:
-            embedding = get_embedding(comment)
-            if embedding:
-                embeddings.append((comment, embedding))
+            embeddings.append(get_embedding(comment))
         except Exception as e:
-            print(f"Failed to get embedding for comment: {comment}. Error: {e}")
-            continue
-    
+            print(f"Skipping comment due to error: {comment}. Error: {e}")
+
     if len(embeddings) < 2:
-        raise ValueError("Not enough valid embeddings to compare.")
-    
-    min_distance = float('inf')
-    most_similar = (None, None)
-    
-    for i in range(len(embeddings)):
-        for j in range(i + 1, len(embeddings)):
-            similarity = cosine_similarity([embeddings[i][1]], [embeddings[j][1]])[0][0]
-            distance = 1 - similarity
-            if distance < min_distance:
-                min_distance = distance
-                most_similar = (embeddings[i][0], embeddings[j][0])
-    
+        raise ValueError("Not enough valid embeddings generated.")
+
+    # Convert to NumPy array for similarity calculation
+    embeddings = np.array(embeddings)
+    similarities = cosine_similarity(embeddings)
+
+    # Find most similar pair
+    most_similar = None
+    max_similarity = -1
+
+    for i in range(len(comments)):
+        for j in range(i + 1, len(comments)):
+            similarity_score = similarities[i, j]
+            if similarity_score > max_similarity:
+                max_similarity = similarity_score
+                most_similar = (comments[i], comments[j])
+
+    # Save the most similar comments
     with open(output_filename, 'w') as f:
-        f.write(most_similar[0] + '\n')
-        f.write(most_similar[1] + '\n')
-    
+        f.write(most_similar[0] + '\n' + most_similar[1] + '\n')
+
     print(f"Most similar pair saved to {output_filename}: {most_similar}")
-
-
 
 def A10(filename='/data/ticket-sales.db', output_filename='/data/ticket-sales-gold.txt', query="SELECT SUM(units * price) FROM tickets WHERE type = 'Gold'"):
     # Connect to the SQLite database
